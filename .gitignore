@@ -1,0 +1,12 @@
+Ignore Python cache and virtual environments
+
+pycache/
+*.py[cod]
+.venv
+venv/
+env/
+
+Ignore local environment variables (Keep your secrets safe!)
+
+.env
+.DS_Store

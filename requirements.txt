@@ -1,0 +1,7 @@
+flask
+yfinance
+pandas
+numpy
+firebase-admin
+requests
+pytz
