@@ -17,9 +17,7 @@ pd.options.mode.chained_assignment = None
 app = Flask(__name__)
 
 # --- FIREBASE SETUP ---
-# We check if app is already initialized to avoid Vercel errors
 if not firebase_admin._apps:
-    # Load credentials from Vercel Environment Variables
     firebase_creds = os.environ.get('FIREBASE_CREDENTIALS')
     if firebase_creds:
         cred_dict = json.loads(firebase_creds)
@@ -78,8 +76,6 @@ def save_state(state):
 def log_trade(state, ticker, strategy, action, price, shares, reason, balance):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg = f"[{strategy}] {action} {ticker}: {shares:.2f} @ ${price:.2f} | Eq: ${balance:,.0f}"
-    
-    # Print to Vercel System Logs (Check Vercel Dashboard to see this)
     print(msg) 
     
     log_entry = f"{timestamp} | {ticker} | {action} | {price} | {shares} | {balance} | {reason}"
@@ -95,13 +91,10 @@ def retry_download(ticker, lookback_days):
 def is_trading_hour():
     nyc = pytz.timezone('America/New_York')
     now = datetime.now(nyc)
-    # Check Weekend (5=Sat, 6=Sun)
     if now.weekday() >= 5: return False 
-    # Check Hours (09:30 - 16:00 ET)
     market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return market_open <= now <= market_close
-
 
 # --- INDICATORS ---
 
@@ -149,24 +142,21 @@ def get_current_equity(state, current_prices):
 # --- CORE LOGIC ---
 
 def run_strategy_logic():
-    if not is_trading_hour():
-        return "Market Closed"
+    # Uncomment the check below for production!
+    # if not is_trading_hour():
+    #     return "Market Closed"
 
     state = get_state()
     if not state: return "Database Error: Could not load state"
 
-    # 1. Update Portfolio Valuation
     current_prices = {}
     for ticker in PORTFOLIO_CONFIG:
         df = retry_download(ticker, 5)
         if df is not None: current_prices[ticker] = df['Close'].iloc[-1]
     
     total_equity = get_current_equity(state, current_prices)
-    print(f"💰 Total Equity: ${total_equity:,.2f}")
     
-    # 2. Execute Strategy per Ticker
     for ticker, config in PORTFOLIO_CONFIG.items():
-        # Get History
         df = retry_download(ticker, 300)
         if df is None: continue
         
@@ -176,46 +166,35 @@ def run_strategy_logic():
         adx = get_adx(df)
         sma_200 = df['Close'].rolling(200).mean().iloc[-1]
         
-        # --- STRATEGY SELECTION (Hybrid + Sniper) ---
         active_strategy = "MEAN_REV"
-        
-        # SQUEEZE: Volatility < 1% (Sniper Mode for CAH)
         if atr_pct < 1.0: 
             active_strategy = "SQUEEZE"
-        # TURTLE: Strong Trend
         elif adx > 25 and price > sma_200: 
             active_strategy = "TURTLE"
         
-        # --- GENERATE SIGNALS ---
         pos_data = state['positions'][ticker]
         current_status = pos_data['status']
         signal = "HOLD"
         reason = ""
 
         if active_strategy == "SQUEEZE":
-            # Fast Breakout (20 Day High)
             hist_high_20 = df['High'].iloc[:-1].rolling(20).max().iloc[-1]
             if current_status == "NEUTRAL" and price > hist_high_20:
                 signal, reason = "BUY", "Squeeze Breakout"
-            else:
-                reason = f"Waiting (Vol {atr_pct:.2f}%)"
                 
         elif active_strategy == "TURTLE":
-            # Slow Breakout (Entry Day High)
             hist_high = df['High'].iloc[:-1].rolling(config['Entry']).max().iloc[-1]
             hist_low = df['Low'].iloc[:-1].rolling(config['Exit']).min().iloc[-1]
             if current_status == "NEUTRAL" and price > hist_high: signal, reason = "BUY", "Turtle Entry"
             elif current_status == "LONG" and price < hist_low: signal, reason = "SELL", "Turtle Exit"
             
         elif active_strategy == "MEAN_REV":
-            # Buy Dips / Sell Mean
             sma = df['Close'].rolling(MR_SETTINGS['Window']).mean().iloc[-1]
             std = df['Close'].rolling(MR_SETTINGS['Window']).std().iloc[-1]
             lower = sma - (MR_SETTINGS['StdDev'] * std)
             if current_status == "NEUTRAL" and price < lower: signal, reason = "BUY", "Dip Buy"
             elif current_status == "LONG" and price > sma: signal, reason = "SELL", "Mean Revert"
 
-        # --- EXECUTION ---
         if signal == "BUY" and state['cash'] > 0:
             shares = calculate_position_size(price, atr_val, total_equity)
             cost = (shares * price) * (1 + COMMISSION_RATE)
@@ -224,8 +203,6 @@ def run_strategy_logic():
                 state['cash'] -= cost
                 state['positions'][ticker] = {"status": "LONG", "shares": shares, "entry_price": price}
                 log_trade(state, ticker, active_strategy, "BUY", price, shares, reason, total_equity)
-            else:
-                print(f"⚠️ {ticker}: Insufficient Cash for {active_strategy}")
 
         elif signal == "SELL" and current_status == "LONG":
             shares = pos_data['shares']
@@ -233,20 +210,35 @@ def run_strategy_logic():
             state['cash'] += rev
             state['positions'][ticker] = {"status": "NEUTRAL", "shares": 0, "entry_price": 0}
             log_trade(state, ticker, active_strategy, "SELL", price, shares, reason, total_equity)
-        else:
-            # Just print status logic
-            pass
 
     save_state(state)
     return "Logic Executed Successfully"
 
 # --- VERCEL ROUTING ---
+
 @app.route('/')
 def home():
-    return "QuantBot is Online. Send GET request to /run to trigger."
+    """
+    DISPLAY DASHBOARD
+    Reads the state from Firebase and shows it as JSON in the browser.
+    """
+    try:
+        state = get_state()
+        if state:
+            # Add a timestamp to know when you last checked
+            state['server_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return jsonify(state)
+        else:
+            return jsonify({"status": "error", "message": "Database not connected. Check Env Vars."}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/run')
 def execute():
+    """
+    TRIGGER BOT
+    Called by cron-job.org to execute trading logic.
+    """
     try:
         result = run_strategy_logic()
         return jsonify({
