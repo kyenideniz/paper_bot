@@ -145,8 +145,8 @@ def get_current_equity(state, current_prices):
 
 def run_strategy_logic():
     # Uncomment the check below for production!
-    # if not is_trading_hour():
-    #     return "Market Closed"
+    if not is_trading_hour():
+        return "Market Closed"
 
     state = get_state()
     if not state: return "Database Error: Could not load state"
