@@ -44,7 +44,7 @@ PORTFOLIO_CONFIG = {
     'WDC':  {'Entry': 50, 'Exit': 20}, 
     'STX':  {'Entry': 65, 'Exit': 35},
     'HOOD': {'Entry': 20, 'Exit': 10},
-    'CAH':  {'Entry': 40, 'Exit': 30} 
+    'NEM':  {'Entry': 45, 'Exit': 30} 
 }
 
 MR_SETTINGS = {'Window': 20, 'StdDev': 2.0} 
