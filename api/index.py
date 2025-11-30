@@ -16,6 +16,8 @@ pd.options.mode.chained_assignment = None
 
 app = Flask(__name__)
 
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+
 # --- FIREBASE SETUP ---
 if not firebase_admin._apps:
     firebase_creds = os.environ.get('FIREBASE_CREDENTIALS')
