@@ -1,10 +1,4 @@
 {
-  "crons": [
-    {
-      "path": "/run",
-      "schedule": "*/15 13-21 * * 1-5"
-    }
-  ],
   "builds": [
     {
       "src": "api/index.py",

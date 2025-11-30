@@ -7,7 +7,6 @@ from firebase_admin import credentials, firestore
 import os
 import json
 import warnings
-import requests
 import pytz
 from datetime import datetime
 
@@ -17,11 +16,10 @@ pd.options.mode.chained_assignment = None
 
 app = Flask(__name__)
 
-# --- FIREBASE SETUP (The Cloud Database) ---
-# We use a singleton check to prevent re-initialization errors on Vercel hot-reloads
+# --- FIREBASE SETUP ---
+# We check if app is already initialized to avoid Vercel errors
 if not firebase_admin._apps:
-    # We will load credentials from Vercel Environment Variables
-    # You must paste your Firebase JSON content into a Vercel Env Var named 'FIREBASE_CREDENTIALS'
+    # Load credentials from Vercel Environment Variables
     firebase_creds = os.environ.get('FIREBASE_CREDENTIALS')
     if firebase_creds:
         cred_dict = json.loads(firebase_creds)
@@ -30,7 +28,6 @@ if not firebase_admin._apps:
     else:
         print("⚠️ Warning: FIREBASE_CREDENTIALS env var not found.")
 
-# Connect to DB
 try:
     db = firestore.client()
 except:
@@ -50,21 +47,9 @@ PORTFOLIO_CONFIG = {
     'CAH':  {'Entry': 40, 'Exit': 30} 
 }
 
-# Standard Mean Reversion Settings
 MR_SETTINGS = {'Window': 20, 'StdDev': 2.0} 
 
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-
 # --- HELPER FUNCTIONS ---
-
-def send_telegram(message):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-            requests.post(url, data=data, timeout=5)
-        except: pass
 
 def get_state():
     if db is None: return None
@@ -85,7 +70,7 @@ def get_state():
 
 def save_state(state):
     if db is None: return
-    # Limit logs to save space
+    # Keep only last 50 logs to save DB space
     if len(state['logs']) > 50:
         state['logs'] = state['logs'][-50:]
     db.collection(COLLECTION_NAME).document(DOC_NAME).set(state)
@@ -93,16 +78,15 @@ def save_state(state):
 def log_trade(state, ticker, strategy, action, price, shares, reason, balance):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg = f"[{strategy}] {action} {ticker}: {shares:.2f} @ ${price:.2f} | Eq: ${balance:,.0f}"
-    print(msg)
-    send_telegram(f"🤖 Bot: {msg}\n({reason})")
     
-    # Add to state logs instead of local CSV
+    # Print to Vercel System Logs (Check Vercel Dashboard to see this)
+    print(msg) 
+    
     log_entry = f"{timestamp} | {ticker} | {action} | {price} | {shares} | {balance} | {reason}"
     state['logs'].append(log_entry)
 
 def retry_download(ticker, lookback_days):
     try:
-        # Reduced retries for serverless speed
         df = yf.download(ticker, period=f"{lookback_days}d", interval="1d", progress=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         return df if not df.empty else None
@@ -112,13 +96,14 @@ def is_trading_hour():
     nyc = pytz.timezone('America/New_York')
     now = datetime.now(nyc)
     # Check Weekend (5=Sat, 6=Sun)
-    if now.weekday() >= 5: return False
-    # Check Hours (09:30 - 16:00)
+    if now.weekday() >= 5: return False 
+    # Check Hours (09:30 - 16:00 ET)
     market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return market_open <= now <= market_close
 
 # --- INDICATORS ---
+
 def get_atr(df, window=14):
     high, low, close = df['High'], df['Low'], df['Close'].shift(1)
     tr = pd.concat([high-low, (high-close).abs(), (low-close).abs()], axis=1).max(axis=1)
@@ -127,13 +112,18 @@ def get_atr(df, window=14):
 def get_adx(df, window=14):
     if len(df) < window * 2: return 0
     high, low, close = df['High'], df['Low'], df['Close']
-    plus_dm, minus_dm = high.diff(), low.diff()
+    
+    plus_dm = high.diff()
+    minus_dm = low.diff()
     plus_dm[plus_dm < 0] = 0
     minus_dm[minus_dm > 0] = 0
+    
     tr = pd.concat([high-low, (high-close.shift()).abs(), (low-close.shift()).abs()], axis=1).max(axis=1)
     atr = tr.ewm(alpha=1/window, adjust=False).mean()
+    
     plus_di = 100 * (plus_dm.ewm(alpha=1/window, adjust=False).mean() / atr)
     minus_di = 100 * (minus_dm.ewm(alpha=1/window, adjust=False).mean().abs() / atr)
+    
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
     return dx.ewm(alpha=1/window, adjust=False).mean().iloc[-1]
 
@@ -142,6 +132,7 @@ def calculate_position_size(price, volatility, total_equity):
     risk_dollars = total_equity * RISK_PER_TRADE
     stop_distance = 2 * volatility
     if stop_distance == 0: return 0
+    
     shares = risk_dollars / stop_distance
     max_position_val = total_equity * 0.24 
     return min(shares, max_position_val / price)
@@ -155,12 +146,13 @@ def get_current_equity(state, current_prices):
     return equity
 
 # --- CORE LOGIC ---
+
 def run_strategy_logic():
     if not is_trading_hour():
         return "Market Closed"
 
     state = get_state()
-    if not state: return "Database Error"
+    if not state: return "Database Error: Could not load state"
 
     # 1. Update Portfolio Valuation
     current_prices = {}
@@ -169,6 +161,7 @@ def run_strategy_logic():
         if df is not None: current_prices[ticker] = df['Close'].iloc[-1]
     
     total_equity = get_current_equity(state, current_prices)
+    print(f"💰 Total Equity: ${total_equity:,.2f}")
     
     # 2. Execute Strategy per Ticker
     for ticker, config in PORTFOLIO_CONFIG.items():
@@ -203,6 +196,8 @@ def run_strategy_logic():
             hist_high_20 = df['High'].iloc[:-1].rolling(20).max().iloc[-1]
             if current_status == "NEUTRAL" and price > hist_high_20:
                 signal, reason = "BUY", "Squeeze Breakout"
+            else:
+                reason = f"Waiting (Vol {atr_pct:.2f}%)"
                 
         elif active_strategy == "TURTLE":
             # Slow Breakout (Entry Day High)
@@ -223,17 +218,23 @@ def run_strategy_logic():
         if signal == "BUY" and state['cash'] > 0:
             shares = calculate_position_size(price, atr_val, total_equity)
             cost = (shares * price) * (1 + COMMISSION_RATE)
+            
             if cost < state['cash'] and shares > 0:
                 state['cash'] -= cost
                 state['positions'][ticker] = {"status": "LONG", "shares": shares, "entry_price": price}
                 log_trade(state, ticker, active_strategy, "BUY", price, shares, reason, total_equity)
+            else:
+                print(f"⚠️ {ticker}: Insufficient Cash for {active_strategy}")
 
         elif signal == "SELL" and current_status == "LONG":
             shares = pos_data['shares']
-            revenue = (shares * price) * (1 - COMMISSION_RATE)
-            state['cash'] += revenue
+            rev = (shares * price) * (1 - COMMISSION_RATE)
+            state['cash'] += rev
             state['positions'][ticker] = {"status": "NEUTRAL", "shares": 0, "entry_price": 0}
             log_trade(state, ticker, active_strategy, "SELL", price, shares, reason, total_equity)
+        else:
+            # Just print status logic
+            pass
 
     save_state(state)
     return "Logic Executed Successfully"
@@ -255,5 +256,6 @@ def execute():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
+# Local testing
 if __name__ == '__main__':
     app.run(debug=True)
