@@ -93,7 +93,14 @@ def retry_download(ticker, lookback_days):
     except: return None
 
 def is_trading_hour():
-    return True
+    nyc = pytz.timezone('America/New_York')
+    now = datetime.now(nyc)
+    # Check Weekend (5=Sat, 6=Sun)
+    if now.weekday() >= 5: return False 
+    # Check Hours (09:30 - 16:00 ET)
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= now <= market_close
 
 
 # --- INDICATORS ---
